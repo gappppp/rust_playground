@@ -1,60 +1,46 @@
-use std::{fs::File, io::{BufReader, Read}, path::Path};
+use std::io::{self};
+mod tcp;
 
-use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
-use serde::Deserialize;
+fn main() {
+    //select role
+    let mut choice : u32;
 
-//STRUCT -----------------------------------------------
-#[derive(Deserialize)]
-struct FormData {
-    req_body: String,
-}
+    println!("Insert role:\n0 -> Server\n1 -> Client");
 
-//FUNCTIONS -----------------------------------------------
-
-
-//ROUTES -----------------------------------------------
-#[get("/")]
-async fn hello() -> impl Responder {
-    let file = File::open(
-        Path::new("./html")
-            .join("index")
-            .with_extension("html"),
-    ).expect("ERRORE NELLA LETTURA DEL FILE");
-
-    let mut file_reader = BufReader::new(file);
-    let mut html = String::new();
-    
-    let _a = file_reader.read_to_string(&mut html);
-
-    HttpResponse::Ok().body(html)
-}
-
-#[post("/r")]
-async fn response(form: web::Form<FormData>) -> HttpResponse {//////////////
-    HttpResponse::Ok().body(format!("req_body: {}", form.req_body))
-}
-#[post("/echo")]
-async fn echo(req_body: String) -> impl Responder {
-    HttpResponse::Ok().body(req_body)
-}
-
-async fn manual_hello() -> impl Responder {
-    HttpResponse::Ok().body("Hey there!")
-}
+    loop {
+        let mut choice_str = String::new();
+        io::stdin().read_line(&mut choice_str).expect("Failed to recieve role");
+        choice =  match choice_str.trim().parse() {
+            Ok(num) => num,
+            Err(_e) => u32::MAX
+        };
 
 
+        if choice <= 1 {
+            break;
+        } else {
+            println!("Select a valid role!");
+        }
+    };
 
-//MAIN -----------------------------------------------
-#[actix_web::main]
-async fn main() -> std::io::Result<()> {
-    HttpServer::new(|| {
-        App::new()
-            .service(hello)
-            .service(echo)
-            .service(response)
-            .route("/hey", web::get().to(manual_hello))
-    })
-    .bind(("127.0.0.1", 8000))?
-    .run()
-    .await
+    //call role methods
+    if choice == 0 {
+        match tcp::server::spawn_tcp_server() {
+            Ok(_) => {
+                println!("Server exited succesfully!");
+            }
+            Err(e) => {
+                println!("{e}");
+            }
+        }
+    } else {
+        match tcp::client::spawn_client() {
+            Ok(_) => {
+                println!("Client exited succesfully!");
+            }
+            Err(e) => {
+                println!("{e}");
+            }
+        }
+    }
 }
