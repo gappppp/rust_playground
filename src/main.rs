@@ -1,5 +1,6 @@
 use std::io::{self};
 mod tcp;
+mod models;
 
 fn main() {
     //select role
@@ -30,7 +31,7 @@ fn main() {
                 println!("Server exited succesfully!");
             }
             Err(e) => {
-                println!("{e}");
+                println!("'Server' exit status: {e}");
             }
         }
     } else {
@@ -39,7 +40,7 @@ fn main() {
                 println!("Client exited succesfully!");
             }
             Err(e) => {
-                println!("{e}");
+                println!("'Client' exit status: {e}");
             }
         }
     }
