@@ -25,107 +25,8 @@ pub fn spawn_client() -> Result<(), Box<dyn std::error::Error>> {
     
     rw_client(stream);
 
-    // //share stream
-    // let shared_stream = Arc::new(Mutex::new(stream));
-    // let stream_listen = Arc::clone(&shared_stream);
-    // let stream_talk = Arc::clone(&shared_stream);
-
-    // //share a shutdown var
-    // let shutdown : Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-    // let shutdown_listen = Arc::clone(&shutdown);
-    // let shutdown_write = Arc::clone(&shutdown);
-
-
-    // let listener_thread = std::thread::spawn(|| listen_server(stream_listen, shutdown_listen));
-    // let talk_thread = std::thread::spawn(|| talk_to_server(stream_talk, shutdown_write));
-    
-    // listener_thread.join().expect("listener thread panicked");
-    // talk_thread.join().expect("talker thread panicked");
-
     Ok(())
 }
-
-// pub fn listen_server(stream: Arc<Mutex<TcpStream>>, shutdown : Arc<AtomicBool>) {
-//     let mut buffer = [0; 1024];
-
-//     loop {
-//         if shutdown.load(Ordering::SeqCst) {
-//             break;
-//         }
-
-//         let mut mutex_stream = stream.lock().unwrap();
-//         let _r = mutex_stream.set_nonblocking(true);
-//         println!("LISTEN");
-//         match mutex_stream.read(&mut buffer) {//TODO NOW
-//             Ok(0) => {//TODO
-//                 println!("Stream closed!");
-//                 shutdown.store(true, Ordering::SeqCst);
-//                 break;
-//             }
-//             Ok(n) => {
-//                 // println!("! {buffer} !");
-//                 let parsed_buffer = String::from_utf8_lossy(&buffer[..n]);
-//                 let parsed_buffer = parsed_buffer.trim();
-//                 println!("RAW: '{parsed_buffer}' !!!!");
-//                 for res in parsed_buffer.split("\n") {//handle all res incoming
-//                     println!("[client]: {res}");
-
-//                     if res == "/exit" {
-//                         shutdown.store(true, Ordering::SeqCst);
-//                         break;
-//                     }
-//                 }
-//             }
-//             Err(ref e) if e.kind() == ErrorKind::WouldBlock => {//happens if read has nothing
-//                 drop(mutex_stream);//unlock stream for others
-//                 // thread::sleep(Duration::from_millis(100));
-//                 println!("WAITING SERVER RES...");
-//             }
-//             Err(e) => {
-//                 eprintln!("Client server-listener thread error: {e}");
-//                 break;
-//             }
-//         }
-//     }
-// }
-
-// pub fn talk_to_server(stream: Arc<Mutex<TcpStream>>, shutdown : Arc<AtomicBool>) {
-//     // let res = "Hello. Server!".as_bytes();
-//     const RANDOM_RESPONSE: [&str; 4] = ["Bee", "Mooow", "Wof", "/exit"];//TODO: experimental
-//     let mut i = 0;//TODO: experimental
-
-//     loop {
-//         let res: String = format!("{}\n",RANDOM_RESPONSE[i]);
-
-//         if shutdown.load(Ordering::SeqCst) {
-//             break;
-//         }
-
-//         if !res.is_empty() {
-//             let res_as_bytes = res.as_bytes();
-            
-//             let mut mutex_stream = stream.lock().unwrap();
-//             let _r = mutex_stream.set_nonblocking(true);
-//             match mutex_stream.write(res_as_bytes) {
-//                 Ok(_) => {
-//                     if i < 3 {
-//                         i = i + 1;
-//                     }
-//                     //TODO
-//                     thread::sleep(Duration::from_millis(300));
-//                 }
-//                 Err(ref e) if e.kind() == ErrorKind::WouldBlock => {//happens if read has nothing
-//                     drop(mutex_stream);
-//                     thread::sleep(Duration::from_millis(150));
-//                 }
-//                 Err(e) => {
-//                     eprintln!("Client server-talker thread error: {e}");
-//                     break;
-//                 }
-//             }
-//         }
-//     }
-// }
 
 pub fn rw_client(mut stream: TcpStream) {
     let mut shutdown = false;
@@ -134,8 +35,47 @@ pub fn rw_client(mut stream: TcpStream) {
     let mut buffer = [0; 1024];
 
     // let res = "Hello. Server!".as_bytes();
-    const RANDOM_RESPONSE: [&str; 4] = ["Bee", "Mooow", "Wof", "exit"];//TODO: experimental
-    let mut i = 0;//TODO: experimental
+    // const RANDOM_RESPONSE: [&str; 4] = ["Bee", "Mooow", "Wof", "exit"];//TODO: experimental
+    let mut req = JsonInfo::from(
+        "run&compile",
+        "fn main(){println!(\"FASTARD\")}"
+        // r#"use rand::Rng;
+        // use std::cmp::Ordering;
+        // use std::io;
+        
+        // fn main() {
+        //     println!("Guess the number!");
+        
+        //     let secret_number = rand::thread_rng().gen_range(1..=100);
+        
+        //     loop {
+        //         println!("Please input your guess.");
+        
+        //         let mut guess = String::new();
+        
+        //         io::stdin()
+        //             .read_line(&mut guess)
+        //             .expect("Failed to read line");
+        
+        //         let guess: u32 = match guess.trim().parse() {
+        //             Ok(num) => num,
+        //             Err(_) => continue,
+        //         };
+        
+        //         println!("You guessed: {guess}");
+        
+        //         match guess.cmp(&secret_number) {
+        //             Ordering::Less => println!("Too small!"),
+        //             Ordering::Greater => println!("Too big!"),
+        //             Ordering::Equal => {
+        //                 println!("You win!");
+        //                 break;
+        //             }
+        //         }
+        //     }
+        // }"#
+    );
+    // let mut i = 0;//TODO: experimental
 
     while !shutdown {
         //READ ----------------------------------------
@@ -179,18 +119,20 @@ pub fn rw_client(mut stream: TcpStream) {
         }
     
         //WRITE ----------------------------------------
-        let res_value: String = format!("{}", RANDOM_RESPONSE[i]);
-        let res_value = JsonInfo { header : res_value.to_string(), body: res_value.to_string()};
-        let res = serde_json::to_string(&res_value).unwrap();
-        let res = format!("{res}☃");
-        let res_as_bytes = res.as_bytes();
+        // let res_value: String = RANDOM_RESPONSE.to_string();
+        // let res_value = JsonInfo::from(res_value.to_string(), res_value.to_string());
 
-        if !res.is_empty() {
-            match stream.write(res_as_bytes) {
+        if !req.is_empty() {
+            let json_req = serde_json::to_string(&req).unwrap();
+            let json_req = format!("{json_req}☃");
+            let req_as_bytes = json_req.as_bytes();
+            req.clear();
+
+            match stream.write(req_as_bytes) {
                 Ok(_) => {
-                    if i < 3 {
-                        i = i + 1;
-                    }
+                    // if i < 3 {
+                    //     i = i + 1;
+                    // }
                     // thread::sleep(Duration::from_millis(300));
                 }
                 Err(ref e) if e.kind() == ErrorKind::WouldBlock => {//happens if read has nothing
