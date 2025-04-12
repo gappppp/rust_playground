@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 use std::fmt;
-
 use serde::{Serialize, Deserialize};
 
+//JsonInfo -----------------------------------------------------------------
 #[derive(Serialize, Deserialize, Debug)]
 pub struct JsonInfo {
     pub header: String,

@@ -1,75 +1,82 @@
-use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+
+use std::collections::VecDeque;
+use std::io::{self, ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use crate::models::models::JsonInfo;
+use uuid::Uuid;//generate ids for socket representation (used on containers)
 
-pub fn handle_client(mut stream: TcpStream) {
+use crate::models::models::*;
+use crate::models::lib::*;
+
+const BUILDER_CONTAINER_NAME: &str = "ruscompy";
+const RUNNER_CONTAINER_NAME: &str = "ruruny";
+const MAX_CLIENTS: u8 = 10;//accept max n clients
+
+pub fn handle_client(mut stream: TcpStream, id: Uuid) {
     let mut shutdown = false;
     let _r = stream.set_nonblocking(true);
     
-    let mut res= JsonInfo::new();
-    let mut buffer = [0; 1024];
-
-    // let mut i = 1;//TODO
+    let mut server_res: VecDeque<JsonInfo>= VecDeque::new();
 
     while !shutdown {
         //READ ----------------------------------------
-        match stream.read(&mut buffer) {
-            Ok(0) => {
-                println!("handle client thread closing...");
-                shutdown = true;
-            }
-            Ok(n) => {
-                let parsed_buffer = String::from_utf8_lossy(&buffer[..n]);
-                let parsed_buffer = parsed_buffer.trim();
+        loop {
+            match read_json_info(&mut stream) {
+                Ok(parsed_data) => {
+                    println!("[client]: {parsed_data}");
 
-                // println!("RAW: '{parsed_buffer}' !!!!");
-
-                for res in parsed_buffer.split("☃") {//handle all res incoming
-                    let parsed_res = serde_json::from_str(&res);
-                    if !parsed_res.is_err() {
-                        let parsed_res: JsonInfo = parsed_res.unwrap();
-                        println!("[client]: {}", parsed_res);
-    
-                        if parsed_res.header == "exit" {
-                            shutdown = true;
-                            break;
-                        } else if parsed_res.header == "run&compile" {
-                            //tell docker
-                            stream = docker_run_compile(stream, parsed_res.body);
-                        }
+                    if parsed_data.header == "exit" {
+                        shutdown = true;
+                        break;
+                    } else if parsed_data.header == "run&compile" {
+                        //tell docker
+                        stream = docker_handler(stream, parsed_data.body, id);
                     }
-                }
-            }
-            Err(ref e) if e.kind() == ErrorKind::WouldBlock => {//happens if read has nothing
-                // thread::sleep(Duration::from_millis(100));
-            }
-            Err(e) => {
-                eprintln!("Server error while listening: {e}");
-                shutdown = true;
+                },
+                Err(e) => {
+                    if let Some(e) = e.downcast_ref::<io::Error>() {//get original error
+                        match e.kind() {
+                            ErrorKind::WouldBlock => {//non-block error
+                                break;
+                            },
+                            _ => {//severe error
+                                eprintln!("Server error while listening: {e}");
+                                shutdown = true;
+                                break;
+                            },
+                        }
+                    } else {//non severe error
+                        eprintln!("{e}");
+                    }
+                },
             }
         }
         
         //WRITE ----------------------------------------
-        // let res_value = format!("dummy response n^{i}");
-        if !res.is_empty() {
-            let res_value = format!("{}☃", serde_json::to_string(&res).unwrap());
-            let res_as_bytes = res_value.as_bytes();
-            res.clear();//clear = no more write next cycle
-
-            match stream.write(res_as_bytes) {
-                Ok(_) => {
-                    // i = i + 1;
-                }
-                Err(ref e) if e.kind() == ErrorKind::WouldBlock => {//happens if read has nothing
-                    // thread::sleep(Duration::from_millis(150));
-                }
+        while let Some(res) = server_res.pop_front() {//foreach JsonInfo needed to be sent
+            match write_json_info(&mut stream, res) {
+                Ok(_ok) => {
+                    // smth
+                },
                 Err(e) => {
-                    eprintln!("Server error while writing {e}");
-                    shutdown = true;
-                }
+                    if let Some(e) = e.downcast_ref::<io::Error>() {//get original error
+                        match e.kind() {
+                            ErrorKind::WouldBlock => {//non-block error
+                                // smth
+                            },
+                            _ => {//severe error
+                                eprintln!("Server error while writing: {e}");
+                                shutdown = true;
+                                break;
+                            },
+                        }
+                    } else {//non severe error
+                        eprintln!("{e}");
+                    }
+                },
             }
         }
         
@@ -77,121 +84,184 @@ pub fn handle_client(mut stream: TcpStream) {
     }
 }
 
-pub fn docker_run_compile(mut stream: TcpStream, body: String) -> TcpStream {
-    const CONTAINER_NAME: &str = "vibrant_blackburn";
+fn is_req_shutdown(stream: &mut TcpStream) -> bool {
+    match read_json_info(stream) {
+        Ok(parsed_data) => {
+            parsed_data.header == "exit"
+        }
+        Err(e) => {
+            if let Some(e) = e.downcast_ref::<io::Error>() {//get original error
+                match e.kind() {
+                    ErrorKind::WouldBlock => {//non-block error
+                        false
+                    },
+                    _ => {//severe error
+                        eprintln!("Server error while listening: {e}");
+                        true
+                    },
+                }
+            } else {
+                false
+            }
+        }
+    }
+}
+
+pub fn docker_handler(mut stream: TcpStream, body: String, id: Uuid) -> TcpStream {
+    match docker_compile(&mut stream, body, id) {
+        Ok(_ok) => {
+            match docker_run(&mut stream, id) {
+                Ok(_ok) => {
+                    // smth
+                }
+                Err(_err) => {
+                    eprintln!("error during run: {_err}");
+                }
+            }
+        }
+        Err(_err) => {
+            println!("error during compile: {_err}");
+        }
+    }
+
+    match docker_clean_compile(id) {
+        Ok(_ok) => {
+            println!("COMPILER container succesfully cleaned!");
+        }
+        Err(_err) => {
+            eprintln!("{_err}");
+        }
+    }
+
+    match docker_clean_run(id) {
+        Ok(_ok) => {
+            println!("RUNNER container succesfully cleaned!");
+        }
+        Err(_err) => {
+            eprintln!("{_err}");
+        }
+    }
+
+    // send exit
+    let _o = write_json_info(
+        &mut stream,
+        JsonInfo::from("exit", "")
+    );
+
+    stream
+}
+
+pub fn docker_compile(stream: &mut TcpStream, body: String, id: Uuid) -> Result<&str, Box<dyn std::error::Error>> {
     let mut retry_counter: u8 = 0;
 
-    //wait until docker is down
+    //wait until 'compiler' & 'runner' containers are up
     loop {
         let output = Command::new("docker")
-            .args(["ps", "-a", "-f", &format!("name={}", CONTAINER_NAME)])
-            .output()
-            .expect("Failed to execute Docker command");
+            .args(["ps"])
+            .output();
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        match output {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
 
-        if stdout.contains(CONTAINER_NAME) && !stdout.contains("Up") {
-            break;
+                if stdout.contains(BUILDER_CONTAINER_NAME) && stdout.contains(BUILDER_CONTAINER_NAME) {
+                    break;
 
-        } else {
-            println!("Container '{}' is currenly unavailable", CONTAINER_NAME);
-            if retry_counter < 10 {
-                println!("Retrying in 3s...");
-                thread::sleep(Duration::from_millis(3000));
-                retry_counter = retry_counter + 1;
-            } else {
-                println!("Request aborted due to exceed on time limit");
-                return stream;
-            }
-            
+                } else {
+                    println!(
+                        "Container '{}' OR '{}' currently unavailable",
+                        BUILDER_CONTAINER_NAME,
+                        RUNNER_CONTAINER_NAME
+                    );
+
+                    if retry_counter < 10 {
+                        println!("Retrying in 3s...");
+                        thread::sleep(Duration::from_millis(3000));
+                        retry_counter = retry_counter + 1;
+                    } else {
+                        return Err("Request aborted due to exceed on time limit".into());
+                    }
+                    
+                }
+            },
+            Err(_err) => {
+                println!("{_err}");
+
+                if retry_counter < 10 {
+                    println!("Retrying in 3s...");
+                    thread::sleep(Duration::from_millis(3000));
+                    retry_counter = retry_counter + 1;
+                } else {
+                    return Err("Request aborted due to exceed on time limit".into());
+                }
+            },
         }
-        // else {
-        //     eprintln!("Container '{}' not found.", CONTAINER_NAME);
-        //     return stream;
-
-        // }
     }
 
-    //boot container
-    let output = Command::new("docker")
-        .arg("start")
-        .arg(CONTAINER_NAME)
-        .output()
-        .expect("Command for booting the container has failed");
-
-    if output.status.success() {
-        println!(
-            "Container '{}' started successfully.",
-            CONTAINER_NAME
-        );
-    } else {
-        eprintln!(
-            "Failed to start the container '{}'. Error: {}",
-            CONTAINER_NAME,
-            String::from_utf8_lossy(&output.stderr)
-        );
+    if is_req_shutdown(stream) {
+        return Err("client requested shutdown prematurely".into());
     }
 
-    //refresh main.rs with 'body':
-    //1 - open file
-    let mut open_file_cmd = Command::new("docker")
+    //insert client body in a new .rs:
+    let child = Command::new("docker")
         .args([
             "exec",
-            "-i",
-            CONTAINER_NAME,
+            "-i",//necessary when using pipes
+            BUILDER_CONTAINER_NAME,
             "sh",
             "-c",
-            "cat > src/main.rs"
+            &format!("cat > ./src/bin/{}", id.to_string()+".rs"),//write smth (cat) inside a file ({})
         ])
         .stdin(Stdio::piped())
-        .spawn()
-        .expect("Open stdin for main.rs command has failed");
+        .spawn();
 
-    //2 - write to file
-    if let Some(mut stdin) = open_file_cmd.stdin.take() {
-        stdin.write_all(body.as_bytes()).expect("Failed to write to stdin");
+    match child {
+        Ok(mut child) => {
+            if let Some(mut stdin) = child.stdin.take() {
+                match stdin.write_all(body.as_bytes()) {
+                    Ok(_ok) => {},
+                    Err(_err) => {
+                        return Err("ERR_PLAYGROUND_WRITE_CLIENTFILE.RS".into());
+                    },
+                }
+            }
+        
+            match child.wait() {
+                Ok(output) => {
+                    if output.success() {
+                        println!("Created clientfile.rs succesfully");
+                    } else {
+                        return Err("ERR_PLAYGROUND_WAIT_CREATE_CLIENTFILE.RS".into());
+                    }
+                }
+                Err(_) => {
+                    return Err("ERR_PLAYGROUND_WAIT_CREATE_CLIENTFILE.RS".into());
+                }
+            }
+        }
+        Err(_err) => {
+            return Err("ERR_PLAYGROUND_CREATE_CLIENTFILE.RS".into());
+        }
     }
 
-    //wait cmd finished
-    let output = open_file_cmd.wait().expect("Failed to wait command 'refresh main.rs'");
-    if output.success() {
-        println!("Inserted client body succesfully!");
-    } else {
-        println!("Error during client body insertion!");
+    if is_req_shutdown(stream) {
+        return Err("client requested shutdown prematurely".into());
     }
 
-    //sperimenthal
-    let output = Command::new("docker")
-        .args([
-            "exec",
-            "-i",
-            CONTAINER_NAME,
-            "sh",
-            "-c",
-            "cat src/main.rs"
-        ])
-        .output()
-        .expect("Failed to read main.rs command");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    println!("CAT COMMAND OUTPUT (FROM '{}'):\n{}", CONTAINER_NAME, stdout);
-    //end sperimenthal
-    
-    ///////////////////////////////////////////
     //cargo build --release => get exe + more oredered (show compile problems then if ok execute)
     println!("Building the file release. This may take a few time...");
-
 
     let child = Command::new("docker")
         .args([
             "exec",
             "-i",
-            CONTAINER_NAME,
+            BUILDER_CONTAINER_NAME,
             "sh",
             "-c",
-            "cargo build --release",
+            // &format!("cargo rustc --release --bin {id}.rs -- -o releases/{id}"),
+            &format!("cargo build --release --bin {id}"),
             // "--manifest-path",
-            // "torun/Cargo.toml"//TODO:need to be setted
+            // "torun/Cargo.toml"
         ])
         .output();
 
@@ -201,22 +271,83 @@ pub fn docker_run_compile(mut stream: TcpStream, body: String) -> TcpStream {
 
             let output_code_status = output.status.code().unwrap();
             if output_code_status != 0 {
-                eprintln!("Build failed with status: {}\n{:?}", output_code_status, String::from_utf8_lossy(&output.stderr));
-                return stream;//TODO add before a msg
+                return Err(
+                    format!(
+                        "Build failed with status: {}\n{:?}",
+                        output_code_status,
+                        String::from_utf8_lossy(&output.stderr)
+                    ).into()
+                );
             }
             
         },
         Err(_err) => {
-            eprintln!("ERR_PLAYGROUND_CARGOBUILD");
-            return stream;//TODO add before a msg
+            return Err("ERR_PLAYGROUND_CARGORUSTC".into());
+        }
+    }
+
+    //copy .exe from COMPILER to shared VOLUME
+    let output = Command::new("docker")
+        .args([
+            "exec",
+            BUILDER_CONTAINER_NAME,
+            "sh",
+            "-c",
+            &format!("cp ./target/release/{id} ../shared_folder/{id}")
+        ])
+        .output();
+
+    match output {
+        Ok(output) => {
+            if !output.status.success() {
+                eprintln!("Failed to copy file: {}", String::from_utf8_lossy(&output.stderr));
+            }
+        }
+        Err(_err) => {
+            eprintln!("ERR_PLAYGROUND_CP_EXE");
+        }
+    }
+
+    Ok("Build created succesfully")
+}
+
+pub fn docker_clean_compile(id: Uuid) -> Result<String, Box<dyn std::error::Error>> {
+    //remove .rs + exe
+    docker_rm_file(BUILDER_CONTAINER_NAME, &format!("./src/bin/{id}.rs"))?;
+    docker_rm_file(BUILDER_CONTAINER_NAME, &format!("./target/release/{id}"))?;
+    docker_rm_file(BUILDER_CONTAINER_NAME, &format!("./target/release/{id}.d"))?;
+    
+    Ok("Ok".to_string())
+}
+
+pub fn docker_run(mut stream: &mut TcpStream, id: Uuid) -> Result<String, Box<dyn std::error::Error>> {
+    println!("Build successful. Running now the build...");
+
+    //copy from VOLUME to RUNNER
+    let output = Command::new("docker")
+        .args([
+            "exec",
+            RUNNER_CONTAINER_NAME,
+            "sh",
+            "-c",
+            &format!("cp ../shared_folder/{id} ./{id}")
+        ])
+        .output();
+
+    match output {
+        Ok(output) => {
+            if !output.status.success() {
+                eprintln!("Failed to copy file: {}", String::from_utf8_lossy(&output.stderr));
+            }
+        }
+        Err(_err) => {
+            eprintln!("ERR_PLAYGROUND_CP_EXE");
         }
     }
 
     //execute .exe
-    println!("Build successful. Running now the build...");
-
     let child = Command::new("docker")
-        .args(["exec", "-i", CONTAINER_NAME, "sh", "-c", "./target/release/compiler_runner_test"])
+        .args(["exec", "-i", RUNNER_CONTAINER_NAME, "sh", "-c", &format!("./{id}")])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -228,138 +359,193 @@ pub fn docker_run_compile(mut stream: TcpStream, body: String) -> TcpStream {
             eprintln!("{_err}");
         }
         Ok(mut child) => {
-            let mut stdin = child.stdin.take().expect("ERR_PLAYGROUND_RUN_TAKE_STDIN");
-            let mut stdout = child.stdout.take().expect("ERR_PLAYGROUND_RUN_TAKE_STDOUT");
-            let mut stderr = child.stderr.take().expect("ERR_PLAYGROUND_RUN_TAKE_STDERR");
+            let mut shutdown = false;
+            let mut server_res: VecDeque<JsonInfo> = VecDeque::new();
+
+            let stdin = child.stdin.take();
+            let stdout = child.stdout.take();
+            let stderr = child.stderr.take();
+
+            if stdin.is_none() || stdout.is_none() || stderr.is_none() {
+                return Err("ERR_PLAYGROUND_RUN_TAKE_STDIOS".into());
+            }
+
+            let mut stdin = stdin.unwrap();
+            let mut stdout = stdout.unwrap();
+            let mut stderr = stderr.unwrap();
 
             let mut stdout_buff = [0u8; 1024];
             let mut stderr_buff = [0u8; 1024];
 
-            // println!("--- START CARGO RUN ---");
-
-            //loop-read stdout & loop-write stdin
-            let stdio_t =thread::spawn(move || {
-                let mut max: u8 = 100;//TODO
-                let mut min: u8 = 1;
-                let mut curr: u8 = 50;
-                let mut curr_str = curr.to_string()+"\n";
-
-                loop {
-                    match stdout.read(&mut stdout_buff) {
-                        Ok(0) => {
-                            break;//cmd terminated
-                        }
-                        Err(_e) => {//report err
-                            eprintln!("Error reading from stdout: {:?}", _e);
-                            break;
-                        }
-                        Ok(_n) => {
-                            let readed = String::from_utf8_lossy(&mut stdout_buff);
-                            let readed = readed.trim();
-                            println!("{readed}");
-                
-                            //TODO: logic to remove
-                            if readed.contains("big") {
-                                max = curr;
-                
-                                if min == max + 1 {
-                                    curr = min;
-                                } else {
-                                    curr = (max+min)/2;
-                                }
-                
-                                curr_str = curr.to_string()+"\n";
-                            }
-                            if readed.contains("small") {
-                                min = curr;
-                
-                                if min == max + 1 {
-                                    curr = max;
-                                } else {
-                                    curr = (max+min)/2;
-                                }
-                
-                                curr_str = curr.to_string()+"\n";
-                            }
-                            //end of TODO
-                
-                            if readed.contains("Please input your guess") {//TODO change logic
-                                //N.B.: io::stdin() EXPECTS a \n after input
-                                if let Err(e) = stdin.write_all(curr_str.as_bytes()) {
-                                    eprintln!("Failed to write to stdin: {:?}", e);
-                                    break;
-                                }
-                                if let Err(e) = stdin.flush() {
-                                    eprintln!("Failed to flush stdin: {:?}", e);
-                                    break;
-                                }
-                            }
-                        }
+            while !shutdown {
+                //READ FROM EXECUTION (STDERR)
+                match stderr.read(&mut stderr_buff) {
+                    Ok(0) => {//other endpoint ended stream
+                        shutdown = true;
                     }
-
-                    thread::sleep(Duration::from_millis(200));
-                }
-            });
-
-            //loop-read stderr
-            let stderr_t = thread::spawn(move || {
-                loop {
-                    match stderr.read(&mut stderr_buff) {
-                        Ok(0) => {
-                            break;
-                        }
-                        Err(_e) => {
-                            eprintln!("Error reading from stdout: {:?}", _e);
-                            break;
-                        }
-                        Ok(_n) => {
-                            eprintln!("{}", String::from_utf8_lossy(&mut stderr_buff));
-                        }
+                    Err(_e) => {//err reading
+                        eprintln!("Error reading from stderr: {:?}", _e);
+                        server_res.push_back(JsonInfo::from("error", &_e.to_string()));
+                        shutdown = true;
                     }
-
-                    thread::sleep(Duration::from_millis(200));
+                    Ok(_n) => {//read succesfully
+                        let stderr_str = String::from_utf8_lossy(&mut stderr_buff);
+                        server_res.push_back(JsonInfo::from("stderr", &stderr_str));
+                    }
                 }
-            });
+
+                //READ FROM EXECUTION (STDOUT)
+                match stdout.read(&mut stdout_buff) {
+                    Ok(0) => {//other endpoint ended stream
+                        shutdown = true;
+                    }
+                    Err(_e) => {//report err
+                        eprintln!("Error reading from stdout: {:?}", _e);
+                        server_res.push_back(JsonInfo::from("error", &_e.to_string()));
+                        shutdown = true;
+                    }
+                    Ok(_n) => {//read succesfully
+                        let readed = String::from_utf8_lossy(&mut stdout_buff);
+                        // let readed = readed.trim();
+                        server_res.push_back(JsonInfo::from("stdout", &readed));
+                    }
+                }
+
+                //WRITE TO EXECUTION THE CLIENT RESPONSE
+                loop {
+                    match read_json_info(&mut stream) {
+                        Ok(client_res) => {
+                            if client_res.header == "exit" {
+                                shutdown = true;
+                                break;
+    
+                            } else if client_res.header == "input" {
+                                if let Err(_err)  = stdin.write_all(&client_res.body.as_bytes()) {
+                                    eprintln!("ERR_PLAYGROUND_FORWARD_STDIN");
+                                    server_res.push_back(
+                                        JsonInfo::from("error", "ERR_PLAYGROUND_FORWARD_STDIN"
+                                    ));
+                                    shutdown = true;
+                                    break;
+
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            if let Some(e) = e.downcast_ref::<io::Error>() {//get original error
+                                match e.kind() {
+                                    ErrorKind::WouldBlock => {//non-block error
+                                        break;
+                                    },
+                                    _ => {//severe error
+                                        eprintln!("Server error while listening: {e}");
+                                        server_res.push_back(
+                                            JsonInfo::from("error", "Server error while listening"
+                                        ));
+                                        shutdown = true;
+                                        break;
+
+                                    },
+                                }
+                            } else {//non severe error
+                                println!("{e}");
+                                server_res.push_back(JsonInfo::from("request_corrupted", ""));   
+                            }
+                        },
+                    }
+                }
+
+                //WRITE TO CLIENT
+                while let Some(res) = server_res.pop_front() {//foreach JsonInfo needed to be sent
+                    match write_json_info(&mut stream, res) {
+                        Ok(_ok) => {
+                            // smth
+                        },
+                        Err(e) => {
+                            if let Some(e) = e.downcast_ref::<io::Error>() {//get original error
+                                match e.kind() {
+                                    ErrorKind::WouldBlock => {//non-block error
+                                        // smth
+                                    },
+                                    _ => {//severe error
+                                        return Err("Server error while writing: {e}".into());
+                                    },
+                                }
+                            } else {//non severe error
+                                eprintln!("{e}");
+                            }
+                        },
+                    }
+                }
+
+                thread::sleep(Duration::from_millis(200));
+            }
 
             //'wait_with_output' = wait until cmd completed (IMPORTANT)
-            let final_output = child.wait_with_output().expect("ERR_PLAYGROUND_RUN_WAIT_END");
-            stdio_t.join().expect("ERR_PLAYGROUND_RUN_WAIT_STDIO");
-            stderr_t.join().expect("ERR_PLAYGROUND_RUN_WAIT_STDERR");
+            match child.wait_with_output() {
+                Ok(final_output) => {
+                    //print exit stats
+                    if final_output.status.success() {
+                        println!("Process completed successfully!");
+                    } else {
+                        println!(
+                            "Process failed with status: {:?}",
+                            final_output.status.code().unwrap()
+                        );
+                    }
 
-            //print exit stats
-            match final_output.status.success() {
-                true => println!("Process completed successfully!"),
-                false => println!("Process failed with status: {:?}", final_output.status.code().unwrap()),
-            }
+                    //eventually print final stdout
+                    let final_stdout = String::from_utf8_lossy(&final_output.stdout);
+                    if !final_stdout.is_empty() {
+                        println!("--- STDOUT ---\n{final_stdout}");
+                    }
 
-            //eventually print final stdout
-            let final_stdout = String::from_utf8_lossy(&final_output.stdout);
-            if !final_stdout.is_empty() {
-                println!("--- STDOUT ---\n{final_stdout}");
-            }
-
-            //eventually print final stderr
-            let final_stderr = String::from_utf8_lossy(&final_output.stderr);
-            if !final_stderr.is_empty() {
-                println!("--- STDERR ---\n{final_stderr}");
+                    //eventually print final stderr
+                    let final_stderr = String::from_utf8_lossy(&final_output.stderr);
+                    if !final_stderr.is_empty() {
+                        println!("--- STDERR ---\n{final_stderr}");
+                    }
+                },
+                Err(_err) => {
+                    return Err("ERR_PLAYGROUND_RUN_WAIT_END".into());
+                }
             }
         }
     }
-    ///////////////////////////////////////////
 
-    // //end: wait program to exit
-    // cargo_run_cmd.wait().expect("Failed to wait on child process");
-    let _o = stream.write(//TODO: send exit (temp)
-        format!(
-            "{}☃",
-            serde_json::to_string(&JsonInfo::from("exit", "")).unwrap()
-        ).as_bytes()
-    );
+    Ok("Ok".to_string())
+}
 
-    stream
+pub fn docker_clean_run(id: Uuid) -> Result<String, Box<dyn std::error::Error>> {
+    //rm exe
+    docker_rm_file(RUNNER_CONTAINER_NAME, &format!("{id}"))?;
+    docker_rm_file(RUNNER_CONTAINER_NAME, &format!("../shared_folder/{id}"))?;
+
+    Ok("Ok".to_string())
+}
+
+pub fn docker_rm_file(container_name: &str, file_path: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let status = Command::new("docker")
+        .args(["exec", container_name, "rm", "-f", file_path])
+        .status();
+
+    match status {
+        Ok(status) => {
+            match status.success() {
+                true => Ok(format!("file '{container_name}:{file_path}' removed succesfully")),
+                false => Err(format!("failed to remove file '{container_name}:{file_path}'").into())
+            }
+        }
+        Err(_err) => {
+            Err(_err.into())
+        }
+    }
 }
 
 pub fn spawn_tcp_server() -> Result<(), Box<dyn std::error::Error>> {
+    //init general
+    let client_accepted: Arc<Mutex<u8>> = Arc::new(Mutex::new(0));
+
     //init server
     let server = TcpListener::bind("127.0.0.1:8000");
     if server.is_err() {
@@ -371,8 +557,37 @@ pub fn spawn_tcp_server() -> Result<(), Box<dyn std::error::Error>> {
     println!("Server listening on 127.0.0.1:8000 ...");
     for stream in server.incoming() {
         match stream {
-            Ok(stream) => {
-                std::thread::spawn(|| handle_client(stream));
+            Ok(mut stream) => {
+                let client_accepted = Arc::clone(&client_accepted);
+                
+                //check client in server
+                let mut mutex_client_accepted = client_accepted.lock().unwrap();
+
+                if *mutex_client_accepted < MAX_CLIENTS {
+                    //client++ 
+                    *mutex_client_accepted = *mutex_client_accepted + 1;
+                    drop(mutex_client_accepted);
+
+                    std::thread::spawn(move || handle_client(stream, Uuid::new_v4()));
+
+                    //client--
+                    let mut mutex_client_accepted = client_accepted.lock().unwrap();
+                    *mutex_client_accepted = *mutex_client_accepted - 1;
+                    drop(mutex_client_accepted);
+
+                } else {
+                    eprintln!("Max clients number reached, refusing further connections");
+                    let _res = write_json_info(
+                        &mut stream,
+                        JsonInfo::from(
+                            "exit",
+                            "Max clients number reached, refusing further connections"
+                        )
+                    );
+                    
+                    drop(stream);
+                }
+
             }
             Err(e) => {
                 eprintln!("Failed to estabilish connection: {e}");
@@ -380,5 +595,6 @@ pub fn spawn_tcp_server() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    println!("Server is shutting down!");
     Ok(())
 }
