@@ -1,4 +1,0 @@
-#ignore whole taget root folder
-**/target/
-#ignore Cargo.lock
-Cargo.lock

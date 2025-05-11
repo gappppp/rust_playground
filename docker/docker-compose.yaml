@@ -1,0 +1,63 @@
+# version: '0.9'
+
+volumes:
+  shared_folder: {}  # create 'shared_folder' VOLUME
+
+services:
+  rust_compiler:
+    image: rust_compiler
+    build: # retrive the Dockerfile in the compiler folder
+      context: ./compiler
+      dockerfile: Dockerfile
+    container_name: ruscompy
+    volumes:
+      - shared_folder:/app/shared_folder  # Mount 'shared_folder' VOLUME to /app/shared_folder in the container
+    # command: ["sleep", "infinity"]  # keep-alive cmd (container need to just run)
+    
+
+  rust_runner:
+    image: rust_runner
+    build: # retrive the Dockerfile in the runner folder
+      context: ./runner
+      dockerfile: Dockerfile
+    container_name: ruruny
+    volumes:
+      - shared_folder:/app/shared_folder  # Mount 'shared_folder' VOLUME to /app/shared_folder in the container
+    # command: ["sleep", "infinity"]  # keep-alive cmd (container need to just run)
+
+
+############################
+
+# docker compose --project-name playground up -d --build
+# docker compose --project-name playground up --build
+
+  ### flags explanation:
+    ### --project-name: rename the compose stack name as (next param)
+    ### -d: run in detached mode (in background)
+
+  ### cmd that if not builded anything yet:
+    ### - build all & start all
+  ### else (already builded previously):
+    ### rebuild images
+    ### build and run (if not exist) / start containers (if exist)
+    ### volume preserved
+
+# docker compose --project-name playground up -d --build --force-recreate
+
+  ### cmd to:
+    ### (re)build all images
+    ### (re)build all and run all containers
+    ### (re)mount volume in all containers
+    ### volume preserved
+
+# docker compose --project-name playground start
+
+  ### cmd to run all
+
+# docker compose --project-name playground stop
+
+  ### cmd to stop all
+
+
+# docker compose --project-name playground down
+  ### cmd to stop and remove all containers and networks    

@@ -71,7 +71,7 @@ pub fn rw_client(mut stream: TcpStream) {
         //         }
         //     }
         // }"#
-    req.push_back(JsonInfo::from("dummy", ""));
+    // req.push_back(JsonInfo::from("dummy", ""));
 
     //streaming loop
     while !shutdown {
